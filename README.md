@@ -128,18 +128,20 @@ FEATUREFLAGS_SIMULATE_OUTAGE=true mvn spring-boot:run
 ```
 
 - Evaluating a flag already cached -> still served (degraded-but-available).
-- Evaluating an uncached / unknown flag -> `200 { "enabled": false, "reason": "FALLBACK" }`.
+- Evaluating an uncached flag while the DB is down -> `200 { "enabled": false, "reason": "FALLBACK" }`.
 - Any write (create/update/delete/override) -> `503 Service Unavailable`.
+
+(Note: an unknown flag while the DB is *healthy* returns `404` — that's a client error, distinct from the DB-down `FALLBACK`.)
 
 ## Validation & status codes
 
 | Scenario | Status |
 |----------|--------|
 | Missing/blank context field, unknown JSON field, invalid enum, bad rollout %, unknown operator/attribute | 400 |
-| Unknown flag on CRUD | 404 |
+| Unknown flag on CRUD or evaluate | 404 |
 | Duplicate flag name on create | 409 |
 | DB unavailable on write | 503 |
-| Unknown flag or DB-down on evaluate | 200 with `reason=FALLBACK` |
+| DB-down (uncached) on evaluate | 200 with `reason=FALLBACK` |
 
 ## Docker
 

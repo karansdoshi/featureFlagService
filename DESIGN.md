@@ -144,8 +144,9 @@ Resolution order — most explicit signal wins:
 4. Default state        flag's configured default
 ```
 
-If the DB is unavailable at any point, fall back to the last cached definition.
-If no cached definition exists, return `{ enabled: false, reason: "FALLBACK" }`.
+If the DB is unavailable, fall back to the last cached definition; if nothing is
+cached, return `{ enabled: false, reason: "FALLBACK" }`. A flag that simply does
+not exist (DB reachable) returns 404 — that is a client error, not degradation.
 
 ### Why this order
 
@@ -215,6 +216,7 @@ evict `cache.remove(flagName)`. The next evaluation repopulates lazily.
 **Fallback on DB unavailable:**
 1. Cache hit exists → serve it (stale-but-available, log a warning)
 2. Cache miss + DB down → return `{ enabled: false, reason: "FALLBACK" }`
+3. Cache miss + DB reachable + flag does not exist → 404 (client error, not fallback)
 
 The principle: a flag service must never bring down its callers. Degraded-but-available
 beats correct-but-down.
@@ -263,13 +265,18 @@ field to a rule variation type.
 | Scenario                        | HTTP Status | reason       |
 |---------------------------------|-------------|--------------|
 | Missing required context field  | 400         | —            |
-| Unknown flag name on evaluate   | 200         | `FALLBACK`   |
+| Unknown flag name on evaluate   | 404         | —            |
 | Unknown flag name on CRUD       | 404         | —            |
 | DB unavailable on evaluate      | 200         | `FALLBACK`   |
 | DB unavailable on write         | 503         | —            |
 
-Evaluation never returns 5xx to the caller — flag unavailability is a degraded
-state, not an error from the caller's perspective.
+> Note: an unknown flag on evaluate returns **404** (overriding the original
+> "200 FALLBACK"). A definitively-unknown flag is a client error/typo and should
+> be surfaced, not masked as OFF. `FALLBACK` is reserved for genuine *degradation*
+> (the DB is unreachable), where availability must win. See DECISIONS.md / D-012.
+
+Evaluation never returns 5xx for a *degraded* dependency — DB unavailability is a
+degraded state, not a caller error; an unknown flag, however, is a caller error.
 
 ---
 

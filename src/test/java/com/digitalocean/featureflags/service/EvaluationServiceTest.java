@@ -1,6 +1,7 @@
 package com.digitalocean.featureflags.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -13,6 +14,7 @@ import com.digitalocean.featureflags.domain.EvaluationResult;
 import com.digitalocean.featureflags.domain.FlagDefinition;
 import com.digitalocean.featureflags.domain.Reason;
 import com.digitalocean.featureflags.domain.Variation;
+import com.digitalocean.featureflags.error.FlagNotFoundException;
 import com.digitalocean.featureflags.evaluation.RolloutBucketer;
 import com.digitalocean.featureflags.evaluation.RuleEngine;
 import com.digitalocean.featureflags.storage.FlagStore;
@@ -70,14 +72,13 @@ class EvaluationServiceTest {
     }
 
     @Test
-    void unknownFlagOnEvaluateReturnsFallback() {
+    void unknownFlagOnEvaluateThrowsNotFound() {
         when(cache.get("f")).thenReturn(Optional.empty());
         when(store.loadDefinition("f")).thenReturn(Optional.empty());
 
-        EvaluationResult result = service.evaluate("f", context);
+        assertThatThrownBy(() -> service.evaluate("f", context))
+                .isInstanceOf(FlagNotFoundException.class);
 
-        assertThat(result.enabled()).isFalse();
-        assertThat(result.reason()).isEqualTo(Reason.FALLBACK);
         verify(cache, never()).put(any(), any());
     }
 

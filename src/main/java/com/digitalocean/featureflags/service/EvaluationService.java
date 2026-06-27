@@ -4,6 +4,7 @@ import com.digitalocean.featureflags.cache.FlagDefinitionCache;
 import com.digitalocean.featureflags.domain.EvaluationContext;
 import com.digitalocean.featureflags.domain.EvaluationResult;
 import com.digitalocean.featureflags.domain.FlagDefinition;
+import com.digitalocean.featureflags.error.FlagNotFoundException;
 import com.digitalocean.featureflags.evaluation.RuleEngine;
 import com.digitalocean.featureflags.storage.FlagStore;
 import java.util.Optional;
@@ -15,9 +16,10 @@ import org.springframework.stereotype.Service;
 /**
  * Evaluation read path: cache-aside load of the definition, then the pure {@link RuleEngine}.
  *
- * <p>Fallback contract (DESIGN.md "Caching Design" / D-012): a cache hit is served even if the
- * DB is down; on a cache miss we load from the DB; an unknown flag or a DB outage both yield a
- * safe-default {@code FALLBACK} (enabled=false). Evaluation never throws to the caller.
+ * <p>Fallback contract (DECISIONS.md / D-012): a cache hit is served even if the DB is down; on
+ * a cache miss we load from the DB. A definitively-unknown flag (DB reachable) yields a 404; a
+ * DB outage with nothing cached yields a safe-default {@code FALLBACK} (enabled=false), so a
+ * transient infra failure never fails the caller.
  */
 @Service
 public class EvaluationService {
@@ -43,12 +45,10 @@ public class EvaluationService {
 
         // Cache miss: load from the source of truth.
         try {
-            Optional<FlagDefinition> loaded = store.loadDefinition(flagName);
-            if (loaded.isEmpty()) {
-                // Unknown flag on evaluate -> FALLBACK (200), per the design's validation table.
-                return EvaluationResult.fallback(flagName);
-            }
-            FlagDefinition definition = loaded.get();
+            FlagDefinition definition = store.loadDefinition(flagName)
+                    // A definitively-unknown flag (DB reachable) is a client error -> 404,
+                    // surfacing typos/misconfiguration rather than silently returning OFF.
+                    .orElseThrow(() -> new FlagNotFoundException(flagName));
             cache.put(flagName, definition);
             return ruleEngine.evaluate(definition, context);
         } catch (DataAccessException ex) {

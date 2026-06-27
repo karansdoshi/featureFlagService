@@ -82,13 +82,11 @@ class FeatureFlagIntegrationTest {
     }
 
     @Test
-    void unknownFlagOnEvaluateReturnsFallback() throws Exception {
+    void unknownFlagOnEvaluateReturnsNotFound() throws Exception {
         mvc.perform(post("/api/flags/does-not-exist/evaluate").contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"userId":"u-1","subscriptionTier":"FREE","region":"US"}"""))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.enabled").value(false))
-                .andExpect(jsonPath("$.reason").value("FALLBACK"));
+                .andExpect(status().isNotFound());
     }
 
     @Test

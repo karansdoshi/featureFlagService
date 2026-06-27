@@ -35,8 +35,8 @@ flowchart TD
   Cache -->|Miss| DB{"DB reachable?"}
   DB -->|"Yes, found"| Load["Load + assemble definition, populate cache"]
   Load --> Engine
-  DB -->|"Yes, not found"| Fb["200 enabled=false, reason=FALLBACK"]
-  DB -->|Down| Fb
+  DB -->|"Yes, not found"| Err404["404 Not Found (client error)"]
+  DB -->|Down| Fb["200 enabled=false, reason=FALLBACK"]
   Engine --> Ovr{"Override for userId?"}
   Ovr -->|Yes| ROvr["reason=OVERRIDE -> override state"]
   Ovr -->|No| Rules{"First rule match (by order)?"}

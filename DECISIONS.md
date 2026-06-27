@@ -93,15 +93,19 @@ environment-specific deviations.
   deliberate targeting (not gated by rollout); rollout governs only unmatched/general traffic;
   default is the safety net.
 
-### D-012: Evaluation favors availability; unknown flag and DB-down both return 200 FALLBACK
-- **Decision:** evaluation never returns 5xx. Unknown flag (DB reachable) → 200
-  `{enabled:false, reason:FALLBACK}`; DB down + uncached → 200 FALLBACK; DB down but cached →
-  serve the cached definition (log a warning). Writes against a down DB → 503.
-- **Why:** a flag service must never bring its callers down. Degraded-but-available beats
-  correct-but-down; OFF is the safe default direction. Writes legitimately fail loudly (503)
-  because there is no safe degraded write.
-- **Note:** this returns 200 (not 404) for an unknown flag on *evaluate*, per the design's
-  validation table — the caller just wants a decision. CRUD reads of an unknown flag still 404.
+### D-012: Unknown flag on evaluate -> 404; FALLBACK reserved for genuine degradation
+- **Decision (updated):** an unknown flag on evaluate returns **404** (DB reachable, flag does
+  not exist). `FALLBACK` (200, `enabled:false`) is reserved for degradation only: DB down +
+  uncached. DB down but cached → serve the cached definition (log a warning). Writes against a
+  down DB → 503.
+- **Why the change:** the provided design returned 200 FALLBACK for an unknown flag, but a
+  definitively-unknown flag is a client error/typo. Returning 404 surfaces misconfiguration
+  instead of silently masking it as OFF; this was an explicit decision to override the design.
+- **Why still availability-first elsewhere:** a flag service must not bring callers down for a
+  *transient* dependency failure. So a DB outage still degrades to FALLBACK (OFF is the safe
+  direction), while writes fail loudly (503) because there is no safe degraded write.
+- **Implementation:** `EvaluationService` throws `FlagNotFoundException` (only) when the DB is
+  reachable and the flag is absent; the `DataAccessException` catch path still returns FALLBACK.
 
 ---
 
