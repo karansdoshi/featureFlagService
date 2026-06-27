@@ -165,7 +165,7 @@ not exist (DB reachable) returns 404 — that is a client error, not degradation
 ```
 HTTP Layer        Spring MVC controllers, request validation (@Valid)
 Service Layer     EvaluationService, FlagService — business logic + cache
-Cache Layer       ConcurrentHashMap<String, FlagDefinition> keyed by flag name
+Cache Layer       Caffeine Cache<String, FlagDefinition> keyed by flag name
 Storage Layer     Spring Data JPA over H2 (swap to Postgres via config)
 ```
 
@@ -207,8 +207,9 @@ invalidation intractable.
 
 **Strategy:** Cache-aside with explicit eviction on write.
 
-**Thread safety:** `ConcurrentHashMap` — atomic get/put/remove with no locking
-overhead. No TTL at this stage; eviction is purely write-triggered.
+**Thread safety:** Caffeine `Cache` — atomic, concurrent get/put/invalidate with no locking
+overhead. Coherence is write-triggered (explicit eviction); a 5-minute `expireAfterWrite` TTL,
+a `maximumSize` bound, and `recordStats` are operational backstops, not the coherence mechanism.
 
 **Invalidation:** On any write to a flag (create / update / delete / override change),
 evict `cache.remove(flagName)`. The next evaluation repopulates lazily.
@@ -293,8 +294,6 @@ degraded state, not a caller error; an unknown flag, however, is a caller error.
 
 ## What I Would Add With More Time
 
-- TTL on cache (Caffeine) as defense-in-depth against missed invalidations
 - Rule-scoped percentage rollout (rollout as a rule variation type)
 - Audit log for flag changes (who changed what and when)
-- Postgres as the production persistence target (H2 for local/test)
 - Metrics endpoint (`/actuator/metrics`) with evaluation latency + cache hit rate

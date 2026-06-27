@@ -78,11 +78,16 @@ environment-specific deviations.
 - **Rejected:** caching evaluation results — context cardinality (userId × tier × region) makes
   hit rates collapse and invalidation intractable.
 
-### D-010: Cache-aside + write-invalidate, no TTL
-- **Why:** we observe every write, so explicit eviction keeps the cache coherent with the DB
-  with no expiry. `ConcurrentHashMap` gives atomic get/put/remove with no locking.
-- **Rejected:** write-through (more failure states) and TTL (staleness windows for no gain).
-  TTL via Caffeine is noted as a "with more time" defense-in-depth item.
+### D-010: Cache-aside + write-invalidate, backed by Caffeine
+- **Why:** we observe every write, so explicit eviction is the primary coherence mechanism and
+  keeps the cache in step with the DB. The cache is backed by Caffeine (behind the
+  `FlagDefinitionCache` abstraction), which adds three operational safeguards on top of the
+  write-invalidate model: a `maximumSize` bound (memory safety), `expireAfterWrite` TTL of 5m as a
+  defense-in-depth safety net for a *missed* eviction (e.g. a future multi-instance deployment), and
+  `recordStats` for hit/miss/eviction metrics.
+- **Rejected:** write-through (more failure states); a bare `ConcurrentHashMap` (no size bound, TTL,
+  or stats); and a TTL-*only* strategy (staleness windows without explicit invalidation). The TTL
+  here is a backstop, not the coherence mechanism.
 
 ---
 

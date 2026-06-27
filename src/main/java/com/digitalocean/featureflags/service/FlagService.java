@@ -7,6 +7,8 @@ import com.digitalocean.featureflags.storage.FlagRecord;
 import com.digitalocean.featureflags.storage.FlagStore;
 import com.digitalocean.featureflags.storage.FlagWrite;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
@@ -15,6 +17,8 @@ import org.springframework.stereotype.Service;
  */
 @Service
 public class FlagService {
+
+    private static final Logger log = LoggerFactory.getLogger(FlagService.class);
 
     private final FlagStore store;
     private final FlagDefinitionCache cache;
@@ -34,21 +38,29 @@ public class FlagService {
 
     public FlagRecord create(FlagWrite write) {
         if (store.exists(write.name())) {
+            log.info("Rejected create of flag '{}': already exists", write.name());
             throw new DuplicateFlagException(write.name());
         }
         FlagRecord created = store.create(write);
         cache.evict(write.name());
+        log.info("Created flag '{}' (defaultState={}, rolloutPercentage={}, rules={})",
+                created.name(), created.defaultState(), created.rolloutPercentage(),
+                created.rules().size());
         return created;
     }
 
     public FlagRecord update(String name, FlagWrite write) {
         FlagRecord updated = store.update(name, write); // throws FlagNotFoundException if absent
         cache.evict(name);
+        log.info("Updated flag '{}' (defaultState={}, rolloutPercentage={}, rules={})",
+                updated.name(), updated.defaultState(), updated.rolloutPercentage(),
+                updated.rules().size());
         return updated;
     }
 
     public void delete(String name) {
         store.delete(name); // throws FlagNotFoundException if absent
         cache.evict(name);
+        log.info("Deleted flag '{}'", name);
     }
 }

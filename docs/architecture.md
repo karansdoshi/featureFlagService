@@ -12,7 +12,7 @@ flowchart LR
   Controllers --> EvalSvc["EvaluationService"]
   Controllers --> FlagSvc["FlagService (CRUD)"]
   Controllers --> OvrSvc["OverrideService"]
-  EvalSvc --> Cache["FlagDefinitionCache (ConcurrentHashMap)"]
+  EvalSvc --> Cache["FlagDefinitionCache (Caffeine)"]
   FlagSvc --> Cache
   OvrSvc --> Cache
   EvalSvc --> Engine["RuleEngine + RolloutBucketer (pure)"]

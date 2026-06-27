@@ -57,6 +57,12 @@
             <version>33.6.0-jre</version>
         </dependency>
 
+        <!-- Caffeine backs the in-memory flag cache: TTL safety net, size bound, hit/miss stats. -->
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+        </dependency>
+
         <!-- Structured JSON logging (DESIGN.md / D-014). -->
         <dependency>
             <groupId>net.logstash.logback</groupId>

@@ -40,7 +40,7 @@ public class EvaluationService {
         // Cache hit: serve regardless of DB state (degraded-but-available on outage).
         Optional<FlagDefinition> cached = cache.get(flagName);
         if (cached.isPresent()) {
-            return ruleEngine.evaluate(cached.get(), context);
+            return logged(ruleEngine.evaluate(cached.get(), context), context);
         }
 
         // Cache miss: load from the source of truth.
@@ -50,12 +50,20 @@ public class EvaluationService {
                     // surfacing typos/misconfiguration rather than silently returning OFF.
                     .orElseThrow(() -> new FlagNotFoundException(flagName));
             cache.put(flagName, definition);
-            return ruleEngine.evaluate(definition, context);
+            return logged(ruleEngine.evaluate(definition, context), context);
         } catch (DataAccessException ex) {
             // DB down and nothing cached: serve safe-default rather than fail the caller.
             log.warn("Database unavailable and no cached definition for flag '{}'; serving FALLBACK",
                     flagName, ex);
             return EvaluationResult.fallback(flagName);
         }
+    }
+
+    private EvaluationResult logged(EvaluationResult result, EvaluationContext context) {
+        if (log.isDebugEnabled()) {
+            log.debug("Evaluated flag '{}' for user '{}' -> enabled={} ({})",
+                    result.flag(), context.userId(), result.enabled(), result.reason());
+        }
+        return result;
     }
 }

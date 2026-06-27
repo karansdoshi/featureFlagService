@@ -13,7 +13,7 @@ database is unavailable.
 
 - Java 21, Spring Boot 3.5 (Web, Data JPA, Validation, Actuator)
 - H2 (file-based; swappable to Postgres via env vars)
-- In-memory cache: `ConcurrentHashMap`
+- In-memory cache: Caffeine (write-invalidate + TTL safety net + size bound + stats)
 - Murmur3 (Guava) for rollout bucketing
 - Structured JSON logging via logstash-logback-encoder
 - JUnit 5 + Mockito
@@ -156,7 +156,7 @@ docker run -p 8080:8080 -v "$PWD/data:/app/data" feature-flag-service
 domain       pure model + evaluation types (no framework)
 evaluation   RuleEngine (precedence) + RolloutBucketer (Murmur3)
 storage      JPA entities, repositories, FlagStore (mapping + outage guard)
-cache        FlagDefinitionCache (ConcurrentHashMap)
+cache        FlagDefinitionCache (Caffeine)
 service      FlagService, OverrideService, EvaluationService
 api          controllers, DTOs, mapper, global exception handler
 ```

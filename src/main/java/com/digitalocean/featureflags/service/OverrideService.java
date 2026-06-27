@@ -4,6 +4,8 @@ import com.digitalocean.featureflags.cache.FlagDefinitionCache;
 import com.digitalocean.featureflags.domain.Variation;
 import com.digitalocean.featureflags.error.FlagNotFoundException;
 import com.digitalocean.featureflags.storage.FlagStore;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
@@ -12,6 +14,8 @@ import org.springframework.stereotype.Service;
  */
 @Service
 public class OverrideService {
+
+    private static final Logger log = LoggerFactory.getLogger(OverrideService.class);
 
     private final FlagStore store;
     private final FlagDefinitionCache cache;
@@ -25,12 +29,14 @@ public class OverrideService {
         requireFlag(flagName);
         store.putOverride(flagName, userId, state);
         cache.evict(flagName);
+        log.info("Set override on flag '{}' for user '{}' -> {}", flagName, userId, state);
     }
 
     public void remove(String flagName, String userId) {
         requireFlag(flagName);
         store.deleteOverride(flagName, userId); // idempotent: no-op if absent
         cache.evict(flagName);
+        log.info("Removed override on flag '{}' for user '{}'", flagName, userId);
     }
 
     private void requireFlag(String flagName) {

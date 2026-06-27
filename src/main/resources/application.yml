@@ -38,6 +38,12 @@ management:
     health:
       show-details: always
 
+logging:
+  level:
+    # App log level is INFO by default (write operations, degraded paths). Bump to DEBUG at
+    # runtime via APP_LOG_LEVEL to see per-evaluation and cache hit/miss detail.
+    com.digitalocean.featureflags: ${APP_LOG_LEVEL:INFO}
+
 # Application-specific knobs.
 featureflags:
   storage:
