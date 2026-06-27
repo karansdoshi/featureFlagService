@@ -1,0 +1,12 @@
+# Overrides layered on top of the main application.yml (loaded via @ActiveProfiles("test")),
+# so settings like Jackson FAIL_ON_UNKNOWN_PROPERTIES still apply. Only the datasource changes.
+spring:
+  datasource:
+    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+
+logging:
+  level:
+    root: WARN

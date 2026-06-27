@@ -1,247 +1,293 @@
-# Feature Flag Service - Design
+# Feature Flag Service — Design Document
 
-A production-ready REST feature-flag service: CRUD for flags, rule-based evaluation against
-a user context, in-memory caching of flag definitions, graceful fallback when the database is
-unavailable, and deterministic percentage rollouts.
+## Overview
 
-This document is the source of truth for the design. Every tradeoff and the rejected
-alternative is recorded in [DECISIONS.md](DECISIONS.md). The visual lifecycle lives in
-[docs/architecture.md](docs/architecture.md).
+A REST API service that stores feature flags, manages flag states, and evaluates
+feature availability based on user context. Supports targeting rules, per-user
+overrides, and deterministic percentage rollout.
 
 ---
 
-## 1. Stack
+## REST APIs
 
-- Java 21 (LTS) + Spring Boot 3.5.x: Web, Data JPA, Validation, Actuator.
-- Build: Maven (declarative POM I can read top-to-bottom; Spring Initializr default).
-- Persistence: H2 file-based via Spring Data JPA.
-- Cache: a plain `ConcurrentHashMap` wrapped in a small cache component.
-- Tests: JUnit 5 + Mockito.
+### Flag Management
 
-See DECISIONS.md (D-001..D-005) for why each was chosen over the alternative.
+| Method   | Path                  | Description              |
+|----------|-----------------------|--------------------------|
+| `POST`   | `/api/flags`          | Create a flag            |
+| `GET`    | `/api/flags`          | List all flags           |
+| `GET`    | `/api/flags/{name}`   | Get a flag               |
+| `PUT`    | `/api/flags/{name}`   | Update a flag            |
+| `DELETE` | `/api/flags/{name}`   | Delete a flag            |
+
+### Evaluation
+
+| Method | Path                        | Description                        |
+|--------|-----------------------------|------------------------------------|
+| `POST` | `/api/flags/{name}/evaluate`| Evaluate one flag for a user       |
+
+### Overrides
+
+| Method   | Path                                        | Description                  |
+|----------|---------------------------------------------|------------------------------|
+| `PUT`    | `/api/flags/{name}/overrides/{userId}`      | Set override for (flag, user)|
+| `DELETE` | `/api/flags/{name}/overrides/{userId}`      | Remove override               |
+
+### Health
+
+| Method | Path               | Description  |
+|--------|--------------------|--------------|
+| `GET`  | `/actuator/health` | Liveness     |
 
 ---
 
-## 2. Domain model
+## Key Payloads
 
-A **Flag** is an aggregate root. It owns an ordered list of **Rules**; each Rule owns a list
-of **Conditions** and a resulting variation.
+### Create / Update flag
+
+```json
+POST /api/flags
+{
+  "name": "new-checkout",
+  "defaultState": "OFF",
+  "rolloutPercentage": 20,
+  "rules": [
+    {
+      "attribute": "subscriptionTier",
+      "operator": "EQUALS",
+      "value": "PREMIUM",
+      "result": "ON",
+      "order": 1
+    },
+    {
+      "attribute": "region",
+      "operator": "IN",
+      "values": ["IN", "US"],
+      "result": "ON",
+      "order": 2
+    }
+  ]
+}
+```
+
+### Evaluate
+
+```json
+POST /api/flags/new-checkout/evaluate
+{
+  "userId": "u-123",
+  "subscriptionTier": "FREE",
+  "region": "IN"
+}
+
+// Response
+{
+  "flag": "new-checkout",
+  "enabled": true,
+  "reason": "ROLLOUT"
+}
+```
+
+The `reason` field is always present. Possible values:
+`OVERRIDE` | `RULE_MATCH` | `ROLLOUT` | `DEFAULT` | `FALLBACK`
+
+### Set override
+
+```json
+PUT /api/flags/new-checkout/overrides/u-123
+{
+  "state": "ON"
+}
+```
+
+---
+
+## Data Model
 
 ```
-Flag
-  name            : String   (unique identifier, primary key)
-  description      : String
-  defaultState     : boolean  (the fallthrough variation if no rule matches)
-  rules            : List<Rule>  (ORDERED; evaluated first to last)
+FeatureFlag
+  name             String (PK)
+  defaultState     Enum {ON, OFF}
+  rolloutPercentage Int (0..100)
+  createdAt        Timestamp
+  updatedAt        Timestamp
 
 Rule
-  conditions        : List<Condition>   (ALL must match -> rule matches; AND semantics)
-  variation         : Variation         (ON | OFF; result when this rule matches)
-  rolloutPercentage : Integer?          (0..100; optional sticky percentage gate)
+  id               Long (PK)
+  flagName         String (FK -> FeatureFlag)
+  attribute        String        -- e.g. "subscriptionTier"
+  operator         Enum {EQUALS, IN, NOT_EQUALS}
+  value            String        -- single value for EQUALS / NOT_EQUALS
+  values           String        -- comma-separated list for IN
+  result           Enum {ON, OFF}
+  order            Int           -- evaluation order, ascending
 
-Condition
-  attribute : Attribute   (USER_ID | SUBSCRIPTION_TIER | REGION)
-  operator  : Operator    (EQUALS | IN | NOT_IN)
-  values    : List<String>
-
-EvaluationContext (request input)
-  userId           : String   (required, non-blank)
-  subscriptionTier : String   (required, non-blank)
-  region           : String   (required, non-blank)
+FlagOverride
+  flagName         String (PK, FK -> FeatureFlag)
+  userId           String (PK)
+  state            Enum {ON, OFF}
 ```
 
-### 2.1 Persistence shape
-
-The Flag aggregate is stored as a **single row**: scalar columns (`name`, `description`,
-`default_state`) plus the `rules` list serialized to a JSON column (`rules_json`). The only
-access pattern is whole-aggregate read/write keyed by name, which is exactly what cache-aside
-by name needs; we never run SQL against rule internals. See DECISIONS.md D-006 (rejected:
-fully normalized Flag/Rule/Condition tables).
+Composite primary key on `FlagOverride(flagName, userId)` — no surrogate id needed.
+Rules are ordered by the `order` field; first match wins.
 
 ---
 
-## 3. Evaluation semantics (reviewer Q1)
+## Evaluation Precedence
 
-Evaluation is **ordered, first-match-wins**:
-
-1. Walk `rules` in declared order.
-2. A rule **matches** when **all** of its conditions match the context **AND** the rollout
-   gate passes (no `rolloutPercentage`, or the user falls inside the bucket - see section 7).
-3. The first matching rule's `variation` is the result. Evaluation stops there.
-4. If **no** rule matches, return the flag's `defaultState`.
-
-`defaultState` is the terminal fallthrough, not "rule 0". This keeps the mental model simple:
-rules are overrides layered on top of a default.
-
-A condition matches by operator:
-- `EQUALS`: the context attribute equals `values[0]`.
-- `IN`: the context attribute is one of `values`.
-- `NOT_IN`: the context attribute is none of `values`.
-
----
-
-## 4. What we cache (reviewer Q2)
-
-**We cache flag DEFINITIONS keyed by name. We never cache evaluation RESULTS.**
-
-- Results depend on `(userId, subscriptionTier, region, rollout bucket)`. With percentage
-  rollout this is effectively per-user, so a result cache explodes in cardinality and its hit
-  rate collapses.
-- Invalidating result entries on a flag edit is intractable (you would have to evict every
-  context permutation for that flag).
-- Definitions are few and bounded. Evaluating rules in memory is cheap CPU work, so caching
-  the definition and evaluating per-request gives us the DB-offload win without the cardinality
-  problem.
-
----
-
-## 5. Cache strategy + invalidation (reviewer Q3, Q4)
-
-- **Cache-aside (lazy load).** The read path checks the cache; on a miss it loads from the DB
-  and populates the cache, then returns.
-- **Thread-safety** comes from `ConcurrentHashMap`. Reads are lock-free; `computeIfAbsent`
-  guards population.
-- **No TTL.** TTL exists to bound staleness when you cannot observe writes. We observe every
-  write (all mutations go through this service), so we invalidate explicitly and the cache is
-  always coherent with the DB. The definition set is small, so memory pressure is a non-issue.
-- **Write-invalidate, not write-through.** On create/update/delete we write to the DB inside a
-  transaction and, only after a successful commit, **evict** that flag's entry. The next read
-  repopulates from the source of truth.
-  - Why evict instead of overwrite: fewer states and no risk of caching a value whose persist
-    later fails or whose transaction rolls back. See DECISIONS.md D-008.
-- **Invalidation timing is exact and testable:** eviction happens in the service layer
-  immediately after the repository call returns successfully, and does **not** happen if the
-  write throws. This is unit-tested by mocking the repository and asserting `evict(name)` is
-  (not) called.
-
----
-
-## 6. Graceful fallback contract (reviewer Q5)
-
-The evaluation endpoint favors **availability**: callers always get a deterministic ON/OFF.
-
-| Situation | Behavior | HTTP |
-|---|---|---|
-| Definition in cache | Evaluate from cache (DB state irrelevant) | 200 |
-| Cache miss, DB reachable, flag found | Load + populate cache, evaluate | 200 |
-| Cache miss, DB reachable, flag not found | Unknown flag is a client error | 404 |
-| Cache miss, DB **down**, no cached definition | We cannot know the configured default -> serve **safe-default OFF**, mark degraded | 200 + `degraded=true` + `X-FeatureFlag-Degraded: true` |
-
-Rationale:
-- A flag that is already cached keeps serving correctly during a DB outage - that is the whole
-  point of the cache.
-- When we have never seen the flag and the DB is down, we genuinely do not know its default
-  (it lives in the DB). Returning **OFF** is the safe direction: we never accidentally enable a
-  feature during an outage. We return 200 (not 503) so client code that just wants a flag
-  decision keeps working, and we set `degraded=true` so callers/operators can detect it.
-- **503 is reserved for where it belongs:** the Actuator **readiness** probe reports DOWN/503
-  when the DB is unreachable, so orchestrators stop routing new traffic to a degraded instance.
-  This separates "this instance is degraded" (readiness, 503) from "give me a flag decision"
-  (evaluation, always 200).
-
-See DECISIONS.md D-009 for the rejected alternative (return 503 from evaluation) and D-010 for
-404-vs-OFF on a definitively-unknown flag.
-
----
-
-## 7. Percentage rollout determinism (reviewer Q6)
-
-A rule may carry `rolloutPercentage` in `[0, 100]`. The rollout gate is:
+Resolution order — most explicit signal wins:
 
 ```
-bucket = Math.floorMod(hash(flagName + ":" + userId), 100)
-passes = bucket < rolloutPercentage
+1. Per-user override    (flagName + userId) → return immediately if found
+2. Targeting rules      first match in order → return rule result
+3. Percentage rollout   hash(flagName:userId) % 100 < rolloutPct → return ON
+4. Default state        flag's configured default
 ```
 
-- **Hash function:** SHA-256 of `flagName + ":" + userId`, take the first 8 bytes as a long.
-  - Why not `String.hashCode()`: weak avalanche / poor distribution and it can be negative.
-  - SHA-256 is in the JDK (no dependency), uniform, and stable across JVMs/runs.
-- **Why include the flag name in the hash:** it decorrelates rollouts across flags. Without it,
-  the same user maps to the same bucket for every flag, so one "unlucky" user would be inside
-  (or outside) the first N% of *every* rollout simultaneously. Salting with the flag name makes
-  each flag's rollout independent - a user can be in flag A's 10% but not flag B's 10%.
-- **Why it is stable across calls:** the hash is a pure function of `(flagName, userId)` with no
-  RNG and no clock. The same inputs always yield the same bucket, so a user's exposure is
-  "sticky" with **zero per-user state stored**.
-- **Modulo bias:** `% 100` over a value drawn from a ~2^64 range is non-uniform only at the
-  ~2^64 / 100 boundary, an utterly negligible skew. We accept it rather than add
-  rejection-sampling complexity. Documented in DECISIONS.md D-011.
+If the DB is unavailable at any point, fall back to the last cached definition.
+If no cached definition exists, return `{ enabled: false, reason: "FALLBACK" }`.
 
-The rollout gate is part of "does this rule match": a rule with conditions + a rollout passes
-only if the conditions match AND the bucket passes.
+### Why this order
+
+- Overrides are explicit operator intent — they must always win.
+- Rules are deliberate product targeting — they should not be gated by rollout.
+- Rollout applies to unmatched traffic only — it controls gradual exposure
+  for the general population, not for explicitly targeted cohorts.
+- Default is the safety net when nothing else resolves.
 
 ---
 
-## 8. Validation contract (reviewer Q7)
+## Architecture
 
-- Bean Validation (`@NotBlank`) on the context DTO + `@Valid` on the controller parameter.
-- Jackson configured with `FAIL_ON_UNKNOWN_PROPERTIES=true` so unknown context fields are
-  rejected rather than silently ignored.
-- A single `@RestControllerAdvice` maps exceptions to a structured JSON error body:
-  `{ timestamp, status, error, message, path, fieldErrors[] }`.
+### Layers
 
-Status codes by error class:
+```
+HTTP Layer        Spring MVC controllers, request validation (@Valid)
+Service Layer     EvaluationService, FlagService — business logic + cache
+Cache Layer       ConcurrentHashMap<String, FlagDefinition> keyed by flag name
+Storage Layer     Spring Data JPA over H2 (swap to Postgres via config)
+```
 
-| Class | Example | Status |
-|---|---|---|
-| Validation | missing/blank `userId`/`subscriptionTier`/`region`, unknown JSON field, malformed JSON, invalid enum | 400 |
-| Unknown flag | CRUD or evaluation against a name that does not exist (DB reachable) | 404 |
-| Duplicate | create a flag whose name already exists | 409 |
-| Degraded readiness | readiness probe while DB unreachable | 503 |
-| Degraded evaluation | DB down + uncached flag | 200 + `degraded=true` |
-| Unexpected | uncaught error | 500 |
+### Request lifecycle — evaluate
+
+```
+Client
+  → POST /api/flags/{name}/evaluate
+  → Controller: validate context payload (@Valid)
+  → EvaluationService
+      → Cache lookup by flag name
+          HIT  → proceed to rule engine
+          MISS → load from DB → populate cache → proceed to rule engine
+               → DB down? → serve last-cached OR return FALLBACK
+      → Rule engine: apply precedence (override → rules → rollout → default)
+  → Return { enabled, reason }
+```
+
+### Request lifecycle — write (create / update / delete)
+
+```
+Client
+  → POST/PUT/DELETE /api/flags/{name}
+  → Controller: validate payload
+  → FlagService
+      → Persist to DB (source of truth updated first)
+      → Evict cache entry for flag name
+  → Next evaluation sees cache miss → lazy reload from DB
+```
 
 ---
 
-## 9. API surface
+## Caching Design
 
-```
-POST   /api/v1/flags                  create            201 / 409
-GET    /api/v1/flags                  list              200
-GET    /api/v1/flags/{name}           read              200 / 404
-PUT    /api/v1/flags/{name}           update            200 / 404
-DELETE /api/v1/flags/{name}           delete            204 / 404
-POST   /api/v1/flags/{name}/evaluate  evaluate context  200 / 404
-GET    /actuator/health                                 liveness + readiness
-GET    /actuator/health/readiness                       DB-aware readiness
-```
+**What is cached:** Flag definitions (rules + overrides + rolloutPercentage),
+keyed by flag name. NOT evaluation results — results are context-dependent and
+their cardinality (userId × tier × region) would make hit rates collapse and
+invalidation intractable.
 
-Evaluation response body:
-```json
-{ "flagName": "new-checkout", "enabled": true, "reason": "MATCHED_RULE",
-  "matchedRuleIndex": 0, "degraded": false }
-```
-`reason` is one of `MATCHED_RULE`, `DEFAULT`, `FALLBACK_SAFE_DEFAULT`.
+**Strategy:** Cache-aside with explicit eviction on write.
 
----
+**Thread safety:** `ConcurrentHashMap` — atomic get/put/remove with no locking
+overhead. No TTL at this stage; eviction is purely write-triggered.
 
-## 10. Production-readiness
+**Invalidation:** On any write to a flag (create / update / delete / override change),
+evict `cache.remove(flagName)`. The next evaluation repopulates lazily.
 
-- **Health/readiness:** Spring Boot Actuator with liveness + a custom DB-aware readiness
-  indicator (chosen as the standard, lightweight option; D-012).
-- **Structured logging:** Spring Boot 3.4+ built-in JSON logging
-  (`logging.structured.format.console`) - no extra dependency.
-- **Config:** `application.yml` with env-var overrides (`SPRING_DATASOURCE_*`, etc.); no
-  hardcoded credentials.
-- **Graceful shutdown:** `server.shutdown=graceful` + a lifecycle timeout so in-flight
-  requests drain.
-- **Dockerfile:** multi-stage (Maven build -> JRE runtime), runs as a non-root user.
+**Fallback on DB unavailable:**
+1. Cache hit exists → serve it (stale-but-available, log a warning)
+2. Cache miss + DB down → return `{ enabled: false, reason: "FALLBACK" }`
+
+The principle: a flag service must never bring down its callers. Degraded-but-available
+beats correct-but-down.
 
 ---
 
-## 11. Module / package layout
+## Percentage Rollout Design
 
-```
-com.digitalocean.featureflags
-  api          REST controllers + DTOs + global exception handler
-  domain       Flag, Rule, Condition, Variation, Attribute, Operator, EvaluationContext, result
-  evaluation   RuleEvaluator (pure), RolloutBucketer (SHA-256)
-  storage      JPA entity, repository, FlagRepositoryAdapter (maps DataAccess errors)
-  cache        FlagDefinitionCache (ConcurrentHashMap)
-  service      FlagService (CRUD + cache-aside + invalidation), EvaluationService (fallback)
-  config       Jackson, health/readiness, app properties
+**Goal:** Deterministically assign each user a stable bucket (0–99) per flag,
+and serve ON if bucket < rolloutPercentage.
+
+**Algorithm:**
+
+```java
+boolean inRollout(String flagName, String userId, int rolloutPercentage) {
+    if (rolloutPercentage <= 0)   return false;
+    if (rolloutPercentage >= 100) return true;
+    String key = flagName + ":" + userId;
+    long hash = Hashing.murmur3_128()
+                       .hashString(key, StandardCharsets.UTF_8)
+                       .asLong();
+    int bucket = (int) Math.floorMod(hash, 100);
+    return bucket < rolloutPercentage;
+}
 ```
 
-The **evaluation** package is pure (no Spring, no IO) so rule logic and rollout bucketing are
-trivially unit-testable - which matters because rule evaluation and cache invalidation are the
-explicitly-tested areas.
+**Key properties:**
+
+- **Deterministic:** Pure function of (flag, user) — same inputs always give same bucket.
+- **Sticky:** Ramping 10% → 20% → 50% only ever adds users. Nobody who saw ON loses it.
+- **Decorrelated:** `flagName` is included in the hash key so a user's bucket differs
+  per flag. Without it, the same low-bucket users would be first into every rollout.
+- **Accurate distribution:** Murmur3 gives near-uniform buckets over 0–99.
+  `String.hashCode() % 100` clusters — actual rollout would deviate significantly
+  from the configured percentage.
+
+**Scope:** Rollout applies to users who did not match any targeting rule.
+Rule-scoped percentage rollout (ramping within a matched segment) is a natural
+next extension — it would require `rolloutPercentage` to move from a flag-level
+field to a rule variation type.
+
+---
+
+## Validation Contract
+
+| Scenario                        | HTTP Status | reason       |
+|---------------------------------|-------------|--------------|
+| Missing required context field  | 400         | —            |
+| Unknown flag name on evaluate   | 200         | `FALLBACK`   |
+| Unknown flag name on CRUD       | 404         | —            |
+| DB unavailable on evaluate      | 200         | `FALLBACK`   |
+| DB unavailable on write         | 503         | —            |
+
+Evaluation never returns 5xx to the caller — flag unavailability is a degraded
+state, not an error from the caller's perspective.
+
+---
+
+## Production Readiness
+
+- Health endpoint via Spring Actuator (`/actuator/health`)
+- Structured JSON logging (Logback + logstash-logback-encoder)
+- All config via environment variables / `application.yml` (no hardcoded values)
+- Graceful shutdown (Spring Boot `server.shutdown=graceful`)
+- Dockerfile (Ubuntu-compatible, multi-stage build)
+- GitHub Actions CI: build → test → lint on every push
+
+---
+
+## What I Would Add With More Time
+
+- TTL on cache (Caffeine) as defense-in-depth against missed invalidations
+- Rule-scoped percentage rollout (rollout as a rule variation type)
+- Audit log for flag changes (who changed what and when)
+- Postgres as the production persistence target (H2 for local/test)
+- Metrics endpoint (`/actuator/metrics`) with evaluation latency + cache hit rate
