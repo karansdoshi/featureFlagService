@@ -1,0 +1,25 @@
+# Build output
+target/
+!.mvn/wrapper/maven-wrapper.jar
+
+# Workspace-local toolchain (JDK + Maven) - not part of the deliverable
+.tools/
+
+# H2 file database
+data/
+*.mv.db
+*.trace.db
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+# OS
+.DS_Store
+
+# Logs
+*.log
