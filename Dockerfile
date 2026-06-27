@@ -13,11 +13,13 @@ RUN mvn -q -B -e -DskipTests package
 FROM eclipse-temurin:21-jre AS runtime
 WORKDIR /app
 
-# Run as a non-root user.
-RUN useradd --system --uid 10001 --no-create-home appuser
-USER appuser
-
+# Run as a non-root user; pre-create the H2 data dir and hand /app to that user
+# so the file DB can be created at runtime.
+RUN useradd --system --uid 10001 --no-create-home appuser \
+    && mkdir -p /app/data
 COPY --from=build /build/target/feature-flag-service-*.jar app.jar
+RUN chown -R appuser /app
+USER appuser
 
 EXPOSE 8080
 ENV JAVA_OPTS=""
