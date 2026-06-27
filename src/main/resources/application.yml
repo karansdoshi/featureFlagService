@@ -1,0 +1,57 @@
+spring:
+  application:
+    name: feature-flag-service
+
+  datasource:
+    # File-based H2 so data survives restarts. Overridable via env vars; no creds hardcoded.
+    url: ${SPRING_DATASOURCE_URL:jdbc:h2:file:./data/featureflags;DB_CLOSE_ON_EXIT=FALSE}
+    username: ${SPRING_DATASOURCE_USERNAME:sa}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+    driver-class-name: org.h2.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: ${SPRING_JPA_DDL_AUTO:update}
+    open-in-view: false
+
+  jackson:
+    # Reject unknown fields in request payloads (validation contract, DESIGN.md Q7).
+    deserialization:
+      fail-on-unknown-properties: true
+
+  lifecycle:
+    # Allow in-flight requests to drain on shutdown.
+    timeout-per-shutdown-phase: 20s
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always
+      group:
+        readiness:
+          include: readinessState,db
+  health:
+    db:
+      enabled: true
+
+# Structured JSON logging to the console (Spring Boot 3.4+ built-in, no extra dependency).
+logging:
+  structured:
+    format:
+      console: ${LOG_FORMAT:ecs}
+
+# Application-specific knobs.
+featureflags:
+  storage:
+    # Flip to true at runtime to simulate a DB outage and exercise the fallback path.
+    simulate-outage: ${FEATUREFLAGS_SIMULATE_OUTAGE:false}
